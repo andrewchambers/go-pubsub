@@ -1,7 +1,3 @@
-// Copyright 2013, Chandra Sekar S.  All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the README.md file.
-
 // Package pubsub implements a simple multi-topic pub-sub
 // library.
 //
@@ -19,14 +15,14 @@ const (
 	tryPub
 	unsub
 	unsubAll
-	closeTopic
 	shutdown
 )
 
 // PubSub is a collection of topics.
 type PubSub struct {
-	cmdChan  chan cmd
-	capacity int
+	cmdChan      chan cmd
+	capacity     int
+	shuttingDown chan struct{}
 }
 
 type cmd struct {
@@ -39,9 +35,19 @@ type cmd struct {
 // New creates a new PubSub and starts a goroutine for handling operations.
 // The capacity of the channels created by Sub and SubOnce will be as specified.
 func New(capacity int) *PubSub {
-	ps := &PubSub{make(chan cmd), capacity}
+	ps := &PubSub{
+		cmdChan:      make(chan cmd),
+		shuttingDown: make(chan struct{}),
+		capacity:     capacity,
+	}
 	go ps.start()
 	return ps
+}
+
+// Returns a channel that will be closed
+// when the PubSub has been shutdown
+func (ps *PubSub) Done() chan struct{} {
+	return ps.shuttingDown
 }
 
 // Sub returns a channel on which messages published on any of
@@ -58,25 +64,37 @@ func (ps *PubSub) SubOnce(topics ...string) chan interface{} {
 
 func (ps *PubSub) sub(op operation, topics ...string) chan interface{} {
 	ch := make(chan interface{}, ps.capacity)
-	ps.cmdChan <- cmd{op: op, topics: topics, ch: ch}
+	select {
+	case ps.cmdChan <- cmd{op: op, topics: topics, ch: ch}:
+	case <-ps.shuttingDown:
+	}
 	return ch
 }
 
 // AddSub adds subscriptions to an existing channel.
 func (ps *PubSub) AddSub(ch chan interface{}, topics ...string) {
-	ps.cmdChan <- cmd{op: sub, topics: topics, ch: ch}
+	select {
+	case ps.cmdChan <- cmd{op: sub, topics: topics, ch: ch}:
+	case <-ps.shuttingDown:
+	}
 }
 
 // Pub publishes the given message to all subscribers of
 // the specified topics.
 func (ps *PubSub) Pub(msg interface{}, topics ...string) {
-	ps.cmdChan <- cmd{op: pub, topics: topics, msg: msg}
+	select {
+	case ps.cmdChan <- cmd{op: pub, topics: topics, msg: msg}:
+	case <-ps.shuttingDown:
+	}
 }
 
 // TryPub publishes the given message to all subscribers of
 // the specified topics if the topic has buffer space.
 func (ps *PubSub) TryPub(msg interface{}, topics ...string) {
-	ps.cmdChan <- cmd{op: tryPub, topics: topics, msg: msg}
+	select {
+	case ps.cmdChan <- cmd{op: tryPub, topics: topics, msg: msg}:
+	case <-ps.shuttingDown:
+	}
 }
 
 // Unsub unsubscribes the given channel from the specified
@@ -84,38 +102,44 @@ func (ps *PubSub) TryPub(msg interface{}, topics ...string) {
 // from all topics.
 func (ps *PubSub) Unsub(ch chan interface{}, topics ...string) {
 	if len(topics) == 0 {
-		ps.cmdChan <- cmd{op: unsubAll, ch: ch}
+		select {
+		case ps.cmdChan <- cmd{op: unsubAll, ch: ch}:
+		case <-ps.shuttingDown:
+		}
 		return
 	}
 
-	ps.cmdChan <- cmd{op: unsub, topics: topics, ch: ch}
-}
-
-// Close closes all channels currently subscribed to the specified topics.
-// If a channel is subscribed to multiple topics, some of which is
-// not specified, it is not closed.
-func (ps *PubSub) Close(topics ...string) {
-	ps.cmdChan <- cmd{op: closeTopic, topics: topics}
+	select {
+	case ps.cmdChan <- cmd{op: unsub, topics: topics, ch: ch}:
+	case <-ps.shuttingDown:
+	}
 }
 
 // Shutdown closes all subscribed channels and terminates the goroutine.
 func (ps *PubSub) Shutdown() {
-	ps.cmdChan <- cmd{op: shutdown}
+	select {
+	case ps.cmdChan <- cmd{op: shutdown}:
+	case <-ps.shuttingDown:
+	}
+
 }
 
 func (ps *PubSub) start() {
+	defer close(ps.shuttingDown)
+
 	reg := registry{
-		topics:    make(map[string]map[chan interface{}]bool),
-		revTopics: make(map[chan interface{}]map[string]bool),
+		topics:       make(map[string]map[chan interface{}]bool),
+		revTopics:    make(map[chan interface{}]map[string]bool),
+		shuttingDown: ps.shuttingDown,
 	}
 
 loop:
 	for cmd := range ps.cmdChan {
+
 		if cmd.topics == nil {
 			switch cmd.op {
 			case unsubAll:
 				reg.removeChannel(cmd.ch)
-
 			case shutdown:
 				break loop
 			}
@@ -127,21 +151,14 @@ loop:
 			switch cmd.op {
 			case sub:
 				reg.add(topic, cmd.ch, false)
-
 			case subOnce:
 				reg.add(topic, cmd.ch, true)
-
 			case tryPub:
 				reg.sendNoWait(topic, cmd.msg)
-
 			case pub:
 				reg.send(topic, cmd.msg)
-
 			case unsub:
 				reg.remove(topic, cmd.ch)
-
-			case closeTopic:
-				reg.removeTopic(topic)
 			}
 		}
 	}
@@ -156,8 +173,9 @@ loop:
 // registry maintains the current subscription state. It's not
 // safe to access a registry from multiple goroutines simultaneously.
 type registry struct {
-	topics    map[string]map[chan interface{}]bool
-	revTopics map[chan interface{}]map[string]bool
+	topics       map[string]map[chan interface{}]bool
+	revTopics    map[chan interface{}]map[string]bool
+	shuttingDown chan struct{}
 }
 
 func (reg *registry) add(topic string, ch chan interface{}, once bool) {
@@ -174,7 +192,10 @@ func (reg *registry) add(topic string, ch chan interface{}, once bool) {
 
 func (reg *registry) send(topic string, msg interface{}) {
 	for ch, once := range reg.topics[topic] {
-		ch <- msg
+		select {
+		case ch <- msg:
+		case <-reg.shuttingDown:
+		}
 		if once {
 			for topic := range reg.revTopics[ch] {
 				reg.remove(topic, ch)
@@ -194,18 +215,25 @@ func (reg *registry) sendNoWait(topic string, msg interface{}) {
 			}
 		default:
 		}
-
 	}
 }
 
 func (reg *registry) removeTopic(topic string) {
-	for ch := range reg.topics[topic] {
+	m, ok := reg.topics[topic]
+	if !ok {
+		return
+	}
+	for ch := range m {
 		reg.remove(topic, ch)
 	}
 }
 
 func (reg *registry) removeChannel(ch chan interface{}) {
-	for topic := range reg.revTopics[ch] {
+	m, ok := reg.revTopics[ch]
+	if !ok {
+		return
+	}
+	for topic := range m {
 		reg.remove(topic, ch)
 	}
 }
@@ -227,7 +255,6 @@ func (reg *registry) remove(topic string, ch chan interface{}) {
 	}
 
 	if len(reg.revTopics[ch]) == 0 {
-		close(ch)
 		delete(reg.revTopics, ch)
 	}
 }

@@ -1,17 +1,17 @@
-[![GoDoc](https://godoc.org/github.com/cskr/pubsub?status.svg)](https://godoc.org/github.com/cskr/pubsub)
+[![GoDoc](https://godoc.org/github.com/andrewchambers/go-pubsub?status.svg)](https://godoc.org/github.com/andrewchambers/go-pubsub)
 
-Package pubsub implements a simple multi-topic pub-sub library. 
+Package pubsub implements a simple multi-topic pub-sub library. This is a fork
+of https://github.com/cskr/pubsub by Andrew Chambers with some backwards incompatible
+changes.
 
 Install pubsub with,
 
-    go get github.com/cskr/pubsub
-
-This repository contains tagged releases. Please use a dependency manager like
-[dep](https://golang.github.io/dep/) to pin a version for production use.
+    go get github.com/andrewchambers/go-pubsub
 
 ## License
 
-Copyright (c) 2013, Chandra Sekar S  
+Copyright (c) 2013, Chandra Sekar S
+Copyright (c) 2018, Andrew Chambers
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without

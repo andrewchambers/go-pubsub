@@ -1,18 +1,14 @@
-// Copyright 2013, Chandra Sekar S.  All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the README.md file.
-
 package pubsub
 
 import (
-	"reflect"
-	"runtime"
 	"testing"
 	"time"
 )
 
 func TestSub(t *testing.T) {
 	ps := New(1)
+	defer ps.Shutdown()
+
 	ch1 := ps.Sub("t1")
 	ch2 := ps.Sub("t1")
 	ch3 := ps.Sub("t2")
@@ -20,11 +16,18 @@ func TestSub(t *testing.T) {
 	ps.Pub("hi", "t1")
 	ps.Pub("hello", "t2")
 
-	ps.Shutdown()
+	if (<-ch1).(string) != "hi" {
+		t.FailNow()
+	}
 
-	checkContents(t, ch1, []string{"hi"})
-	checkContents(t, ch2, []string{"hi"})
-	checkContents(t, ch3, []string{"hello"})
+	if (<-ch2).(string) != "hi" {
+		t.FailNow()
+	}
+
+	if (<-ch3).(string) != "hello" {
+		t.FailNow()
+	}
+
 }
 
 func TestSubOnce(t *testing.T) {
@@ -34,11 +37,23 @@ func TestSubOnce(t *testing.T) {
 	ch := ps.SubOnce("t1")
 
 	ps.Pub("hi", "t1")
-	checkContents(t, ch, []string{"hi"})
+	ps.Pub("hi", "t1")
+
+	if (<-ch).(string) != "hi" {
+		t.FailNow()
+	}
+
+	select {
+	case <-ch:
+		t.FailNow()
+	case <-time.After(10 * time.Millisecond):
+	}
 }
 
 func TestAddSub(t *testing.T) {
 	ps := New(3)
+	defer ps.Shutdown()
+
 	ch1 := ps.Sub("t1")
 	ch2 := ps.Sub("t2")
 
@@ -49,112 +64,117 @@ func TestAddSub(t *testing.T) {
 	ps.Pub("hi3", "t2")
 	ps.Pub("hi4", "t3")
 
-	ps.Shutdown()
+	join := make(chan struct{})
 
-	checkContents(t, ch1, []string{"hi1", "hi3", "hi4"})
-	checkContents(t, ch2, []string{"hi2", "hi3"})
+	go func() {
+		if (<-ch1).(string) != "hi1" {
+			t.FailNow()
+		}
+
+		if (<-ch1).(string) != "hi3" {
+			t.FailNow()
+		}
+
+		if (<-ch1).(string) != "hi4" {
+			t.FailNow()
+		}
+
+		join <- struct{}{}
+	}()
+
+	if (<-ch2).(string) != "hi2" {
+		t.FailNow()
+	}
+
+	if (<-ch2).(string) != "hi3" {
+		t.FailNow()
+	}
+
+	<-join
 }
 
 func TestUnsub(t *testing.T) {
-	ps := New(1)
+	ps := New(2)
 	defer ps.Shutdown()
 
 	ch := ps.Sub("t1")
 
 	ps.Pub("hi", "t1")
 	ps.Unsub(ch, "t1")
-	checkContents(t, ch, []string{"hi"})
+	ps.Pub("hi", "t1")
+
+	if (<-ch).(string) != "hi" {
+		t.FailNow()
+	}
+
+	select {
+	case <-ch:
+		t.FailNow()
+	case <-time.After(10 * time.Millisecond):
+	}
 }
 
 func TestUnsubAll(t *testing.T) {
 	ps := New(1)
+	defer ps.Shutdown()
+
 	ch1 := ps.Sub("t1", "t2", "t3")
 	ch2 := ps.Sub("t1", "t3")
 
 	ps.Unsub(ch1)
-	checkContents(t, ch1, []string{})
-
 	ps.Pub("hi", "t1")
-	ps.Shutdown()
 
-	checkContents(t, ch2, []string{"hi"})
-}
+	if (<-ch2).(string) != "hi" {
+		t.FailNow()
+	}
 
-func TestClose(t *testing.T) {
-	ps := New(1)
-	ch1 := ps.Sub("t1")
-	ch2 := ps.Sub("t1")
-	ch3 := ps.Sub("t2")
-	ch4 := ps.Sub("t3")
-
-	ps.Pub("hi", "t1")
-	ps.Pub("hello", "t2")
-	ps.Close("t1", "t2")
-
-	checkContents(t, ch1, []string{"hi"})
-	checkContents(t, ch2, []string{"hi"})
-	checkContents(t, ch3, []string{"hello"})
-
-	ps.Pub("welcome", "t3")
-	ps.Shutdown()
-
-	checkContents(t, ch4, []string{"welcome"})
-}
-
-func TestUnsubAfterClose(t *testing.T) {
-	ps := New(1)
-	ch := ps.Sub("t1")
-	defer func() {
-		ps.Unsub(ch, "t1")
-		ps.Shutdown()
-	}()
-
-	ps.Close("t1")
-	checkContents(t, ch, []string{})
+	select {
+	case <-ch1:
+		t.FailNow()
+	case <-time.After(10 * time.Millisecond):
+	}
 }
 
 func TestShutdown(t *testing.T) {
-	start := runtime.NumGoroutine()
-	New(10).Shutdown()
-	time.Sleep(1 * time.Millisecond)
-	if current := runtime.NumGoroutine(); current != start {
-		t.Fatalf("Goroutine leak! Expected: %d, but there were: %d.", start, current)
-	}
+	ps := New(10)
+	ps.Shutdown()
+	<-ps.Done()
 }
 
 func TestMultiSub(t *testing.T) {
 	ps := New(2)
+	defer ps.Shutdown()
+
 	ch := ps.Sub("t1", "t2")
 
 	ps.Pub("hi", "t1")
 	ps.Pub("hello", "t2")
-	ps.Shutdown()
 
-	checkContents(t, ch, []string{"hi", "hello"})
-}
+	if (<-ch).(string) != "hi" {
+		t.FailNow()
+	}
 
-func TestMultiSubOnce(t *testing.T) {
-	ps := New(1)
-	defer ps.Shutdown()
-
-	ch := ps.SubOnce("t1", "t2")
-
-	ps.Pub("hi", "t1")
-	ps.Pub("hello", "t2")
-
-	checkContents(t, ch, []string{"hi"})
+	if (<-ch).(string) != "hello" {
+		t.FailNow()
+	}
 }
 
 func TestMultiPub(t *testing.T) {
-	ps := New(2)
+	ps := New(1)
+	defer ps.Shutdown()
+
 	ch1 := ps.Sub("t1")
 	ch2 := ps.Sub("t2")
 
 	ps.Pub("hi", "t1", "t2")
-	ps.Shutdown()
 
-	checkContents(t, ch1, []string{"hi"})
-	checkContents(t, ch2, []string{"hi"})
+	if (<-ch1).(string) != "hi" {
+		t.FailNow()
+	}
+
+	if (<-ch2).(string) != "hi" {
+		t.FailNow()
+	}
 }
 
 func TestTryPub(t *testing.T) {
@@ -166,15 +186,10 @@ func TestTryPub(t *testing.T) {
 	ps.TryPub("there", "t1")
 
 	<-ch
-	extraMsg := false
 	select {
 	case <-ch:
-		extraMsg = true
+		t.FailNow()
 	default:
-	}
-
-	if extraMsg {
-		t.Fatal("Extra message was found in channel")
 	}
 }
 
@@ -183,37 +198,19 @@ func TestMultiUnsub(t *testing.T) {
 	defer ps.Shutdown()
 
 	ch := ps.Sub("t1", "t2", "t3")
-
 	ps.Unsub(ch, "t1")
 	ps.Pub("hi", "t1")
-	ps.Pub("hello", "t2")
+	ps.Pub("hello1", "t2")
 	ps.Unsub(ch, "t2", "t3")
+	ps.Pub("hello2", "t2")
 
-	checkContents(t, ch, []string{"hello"})
-}
-
-func TestMultiClose(t *testing.T) {
-	ps := New(2)
-	defer ps.Shutdown()
-
-	ch := ps.Sub("t1", "t2")
-
-	ps.Pub("hi", "t1")
-	ps.Close("t1")
-
-	ps.Pub("hello", "t2")
-	ps.Close("t2")
-
-	checkContents(t, ch, []string{"hi", "hello"})
-}
-
-func checkContents(t *testing.T, ch chan interface{}, vals []string) {
-	contents := []string{}
-	for v := range ch {
-		contents = append(contents, v.(string))
+	if (<-ch).(string) != "hello1" {
+		t.FailNow()
 	}
 
-	if !reflect.DeepEqual(contents, vals) {
-		t.Fatalf("Invalid channel contents. Expected: %v, but was: %v.", vals, contents)
+	select {
+	case <-ch:
+		t.FailNow()
+	case <-time.After(10 * time.Millisecond):
 	}
 }

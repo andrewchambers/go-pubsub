@@ -1,1 +1,1 @@
-module github.com/cskr/pubsub
+module github.com/andrewchambers/go-pubsub
